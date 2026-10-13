@@ -7,6 +7,10 @@
   <title>Heroes vs Villains 2026</title>
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦸</text></svg>">
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+  <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin>
+  <link rel="preload" as="image" href="screens/Top%20banner.svg">
+  <link rel="preload" as="image" href="screens/middle%20banner.svg">
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -452,11 +456,15 @@
     const COSTUMES_PATH = ['artifacts', 'waze-costumes-default', 'public', 'data', 'contest_entries'];
     const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
     const COLLECTION_URL = `${FIRESTORE_BASE}/${COSTUMES_PATH.join('/')}`;
+    const META_MASK_QUERY = 'pageSize=100&mask.fieldPaths=ldap&mask.fieldPaths=costumeName&mask.fieldPaths=category&mask.fieldPaths=createdAt&mask.fieldPaths=voters&mask.fieldPaths=isOpen';
     const ADMIN_LIST = ['shirelk', 'frim', 'szilka', 'ronp'];
 
     let costumes = [], votingOpen = false, activeCategory = 'single', userLdap = null, activeStageSlide = 'single-frontrunners';
     let isLoadingCostumes = true, loadErrorMsg = null, isPresentationMode = false;
     const STAGE_SLIDE_ORDER = ['single-frontrunners', 'single-winners', 'group-frontrunners', 'group-winners'];
+    const imageCache = new Map();
+    const inFlightImageIds = new Set();
+    let imgDbPromise = null;
 
     function logLocalDiag(step) {
       if (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '[::1]') {
@@ -464,7 +472,87 @@
       }
     }
 
+    function openImgDb() {
+      if (imgDbPromise) return imgDbPromise;
+      imgDbPromise = new Promise((resolve) => {
+        try {
+          const req = indexedDB.open('wazeCostumeImgDb', 1);
+          req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains('images')) {
+              db.createObjectStore('images', { keyPath: 'id' });
+            }
+          };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => resolve(null);
+        } catch (e) {
+          resolve(null);
+        }
+      });
+      return imgDbPromise;
+    }
+
+    async function loadImagesFromIndexedDb() {
+      const db = await openImgDb();
+      if (!db) return;
+      return new Promise((resolve) => {
+        try {
+          const tx = db.transaction('images', 'readonly');
+          const store = tx.objectStore('images');
+          const req = store.getAll();
+          req.onsuccess = () => {
+            const rows = req.result || [];
+            let updatedAny = false;
+            rows.forEach(r => {
+              if (r && r.id && r.image) {
+                imageCache.set(r.id, r.image);
+                const c = costumes.find(item => item.id === r.id);
+                if (c && !c.image) {
+                  c.image = r.image;
+                  updatedAny = true;
+                  updateCardImageInDom(r.id, r.image, c.costumeName);
+                }
+              }
+            });
+            if (updatedAny) renderRankings();
+            resolve();
+          };
+          req.onerror = () => resolve();
+        } catch (e) {
+          resolve();
+        }
+      });
+    }
+
+    async function saveImageToIndexedDb(id, image) {
+      if (!id || !image) return;
+      imageCache.set(id, image);
+      const db = await openImgDb();
+      if (!db) return;
+      try {
+        const tx = db.transaction('images', 'readwrite');
+        tx.objectStore('images').put({ id, image });
+      } catch (e) {}
+    }
+
+    function updateCardImageInDom(id, image, costumeName) {
+      document.querySelectorAll(`[data-costume-img-slot="${id}"]`).forEach(slot => {
+        const img = document.createElement('img');
+        img.src = image;
+        img.alt = costumeName || '';
+        img.className = 'w-full h-full object-cover';
+        slot.innerHTML = '';
+        slot.appendChild(img);
+      });
+    }
+
     function saveCostumesCache() {
+      try {
+        const metaOnly = costumes.map(({ id, ldap, costumeName, category, createdAt, voters }) => ({
+          id, ldap, costumeName, category, createdAt, voters
+        }));
+        localStorage.setItem('wazeCostumesMetaCache', JSON.stringify({ costumes: metaOnly, votingOpen }));
+      } catch (e) {}
       try {
         sessionStorage.setItem('wazeCostumesCache', JSON.stringify({ costumes, votingOpen }));
       } catch (e) { /* ignore quota errors */ }
@@ -472,16 +560,34 @@
 
     function loadCostumesCache() {
       try {
-        const raw = sessionStorage.getItem('wazeCostumesCache');
-        if (raw) {
-          const parsed = JSON.parse(raw);
+        const rawSession = sessionStorage.getItem('wazeCostumesCache');
+        if (rawSession) {
+          const parsed = JSON.parse(rawSession);
           if (Array.isArray(parsed.costumes) && parsed.costumes.length > 0) {
+            parsed.costumes.forEach(c => {
+              if (c.id && c.image) imageCache.set(c.id, c.image);
+            });
             costumes = parsed.costumes;
+            votingOpen = Boolean(parsed.votingOpen);
+            isLoadingCostumes = false;
+            return;
+          }
+        }
+      } catch (e) {}
+      try {
+        const rawMeta = localStorage.getItem('wazeCostumesMetaCache');
+        if (rawMeta) {
+          const parsed = JSON.parse(rawMeta);
+          if (Array.isArray(parsed.costumes) && parsed.costumes.length > 0) {
+            costumes = parsed.costumes.map(c => ({
+              ...c,
+              image: imageCache.get(c.id) || ''
+            }));
             votingOpen = Boolean(parsed.votingOpen);
             isLoadingCostumes = false;
           }
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
     }
 
     function clearFastRestToken() {
@@ -540,6 +646,48 @@
       return res;
     }
 
+    async function fetchMissingImages() {
+      const missing = costumes
+        .filter(c => !c.image && !inFlightImageIds.has(c.id))
+        .sort((a, b) => {
+          const aActive = (a.category || 'single') === activeCategory ? 0 : 1;
+          const bActive = (b.category || 'single') === activeCategory ? 0 : 1;
+          if (aActive !== bActive) return aActive - bActive;
+          return (b.createdAt || 0) - (a.createdAt || 0);
+        });
+      if (missing.length === 0) return;
+
+      const CONCURRENCY = 4;
+      let idx = 0;
+      async function worker() {
+        while (idx < missing.length) {
+          const item = missing[idx++];
+          if (!item || item.image || inFlightImageIds.has(item.id)) continue;
+          inFlightImageIds.add(item.id);
+          try {
+            const res = await firestoreRestFetch(`${COLLECTION_URL}/${encodeURIComponent(item.id)}?mask.fieldPaths=image`);
+            if (res.ok) {
+              const docData = await res.json();
+              const imgStr = docData.fields?.image?.stringValue || '';
+              if (imgStr) {
+                const target = costumes.find(c => c.id === item.id);
+                if (target) target.image = imgStr;
+                await saveImageToIndexedDb(item.id, imgStr);
+                updateCardImageInDom(item.id, imgStr, item.costumeName);
+                renderRankings();
+              }
+            }
+          } catch (e) {
+            console.warn("Image fetch warning for", item.id, e);
+          } finally {
+            inFlightImageIds.delete(item.id);
+          }
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, missing.length) }, () => worker()));
+      saveCostumesCache();
+    }
+
     window.fetchCostumesFast = async function fetchCostumesFast(isBackgroundPoll = false) {
       if (!isBackgroundPoll && costumes.length === 0) {
         isLoadingCostumes = true;
@@ -548,7 +696,8 @@
       }
       try {
         if (!isBackgroundPoll) logLocalDiag('fetch_start');
-        const res = await firestoreRestFetch(`${COLLECTION_URL}?pageSize=100`);
+        // Phase 1: Fetch lightweight 2KB metadata without 1.4MB Base64 images (~120ms)
+        const res = await firestoreRestFetch(`${COLLECTION_URL}?${META_MASK_QUERY}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const docs = data.documents || [];
@@ -559,11 +708,12 @@
           if (id === '_config_') {
             votingOpen = Boolean(f.isOpen?.booleanValue);
           } else {
+            const existingImg = imageCache.get(id) || costumes.find(c => c.id === id)?.image || '';
             loaded.push({
               id,
               ldap: f.ldap?.stringValue || '',
               costumeName: f.costumeName?.stringValue || '',
-              image: f.image?.stringValue || '',
+              image: existingImg,
               category: f.category?.stringValue || 'single',
               createdAt: Number(f.createdAt?.integerValue || f.createdAt?.doubleValue || 0),
               voters: (f.voters?.arrayValue?.values || []).map(v => v.stringValue).filter(Boolean)
@@ -575,7 +725,10 @@
         loadErrorMsg = null;
         saveCostumesCache();
         renderGrid(); updateUI(); renderRankings();
-        if (!isBackgroundPoll) logLocalDiag(`fetch_ok_${loaded.length}`);
+        if (!isBackgroundPoll) logLocalDiag(`fetch_meta_ok_${loaded.length}`);
+
+        // Phase 2: Load any uncached images in priority order (active tab + newest first)
+        fetchMissingImages();
       } catch (err) {
         console.error("Firestore REST fetch error:", err);
         isLoadingCostumes = false;
@@ -597,6 +750,9 @@
       loadCostumesCache();
       renderGrid(); updateUI(); renderRankings();
 
+      // Hydrate cached images from IndexedDB in parallel with network metadata fetch
+      const idbPromise = loadImagesFromIndexedDb();
+
       if (window.location.hash === '#winners') {
         window.openStagePresentation();
       }
@@ -604,9 +760,10 @@
         if (window.location.hash === '#winners') window.openStagePresentation();
       });
 
+      await idbPromise;
       await window.fetchCostumesFast(false);
 
-      // Keep costumes & votes synced in real time without WebChannel hangs
+      // Keep costumes & votes synced in real time (downloads only 2KB metadata every 8s!)
       setInterval(() => {
         if (!document.hidden) window.fetchCostumesFast(true);
       }, 8000);
@@ -692,8 +849,12 @@
         const safeLdap = escapeHtml(c.ldap);
         return `
                 <div class="waze-card overflow-hidden flex flex-col h-full relative">
-                    <div class="h-64 overflow-hidden relative">
-                        <img src="${c.image}" alt="${safeName}" class="w-full h-full object-cover">
+                    <div class="h-64 overflow-hidden relative bg-gray-100">
+                        <div class="w-full h-full flex items-center justify-center" data-costume-img-slot="${c.id}">
+                            ${c.image
+                              ? `<img src="${c.image}" alt="${safeName}" class="w-full h-full object-cover">`
+                              : `<div class="flex flex-col items-center justify-center text-gray-400 animate-pulse"><span class="text-3xl mb-1">🦸</span><span class="text-[10px] font-black uppercase tracking-widest">Loading photo...</span></div>`}
+                        </div>
                         ${hasVoted ? `<div class="absolute top-4 right-4 bg-green-500 text-white px-4 py-2 rounded-full font-black shadow-lg border-2 border-white flex items-center gap-1 uppercase text-[10px]">✅ Selected</div>` : ''}
                         <div class="admin-only absolute top-4 left-4">
                             <button onclick="openDeleteEntryModal('${c.id}')" class="bg-white/90 p-2 rounded-full text-red-500 shadow-md">🗑️</button>
@@ -1115,6 +1276,7 @@
         ? 'tab-active px-4 sm:px-6 py-2.5 rounded-full font-black text-xs md:text-sm border-2 border-black flex items-center gap-2 transition'
         : 'tab-inactive px-4 sm:px-6 py-2.5 rounded-full font-black text-xs md:text-sm border-2 border-transparent flex items-center gap-2 transition';
       renderGrid(); renderRankings();
+      fetchMissingImages();
     };
 
     window.openUploadModal = () => {
@@ -1178,8 +1340,8 @@
           img.src = event.target.result;
           img.onload = () => {
             const canvas = document.createElement('canvas');
-            const MAX_WIDTH = 800; // Resize to max 800px width/height
-            const CONST_SCALE = 0.7; // 70% quality
+            const MAX_WIDTH = 640; // Fast, crisp 640px max dimension
+            const CONST_SCALE = 0.68; // 68% JPEG quality (~35KB per photo)
             let width = img.width;
             let height = img.height;
 
@@ -1273,6 +1435,7 @@
           voters: [],
           createdAt: nowTs
         };
+        await saveImageToIndexedDb(newId, compressedImage);
         if (!costumes.some(c => c.id === newId)) {
           costumes.push(newEntry);
         }
