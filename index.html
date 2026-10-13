@@ -442,23 +442,27 @@
     <span id="toast-icon" class="text-lg"></span> <span id="toast-msg"></span>
   </div>
 
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-    import { getFirestore, collection, addDoc, onSnapshot, doc, updateDoc, arrayUnion, arrayRemove, setDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-
+  <script>
     const firebaseConfig = {
       apiKey: "AIzaSyCfx3wajLL12k12Yq43rvcqedRRjnKK92Y", authDomain: "waze-costume-party.firebaseapp.com",
       projectId: "waze-costume-party", storageBucket: "waze-costume-party.firebasestorage.app",
       messagingSenderId: "1057125475439", appId: "1:1057125475439:web:2e1042532a0bbd572f199a"
     };
 
-    const app = initializeApp(firebaseConfig); const db = getFirestore(app); const auth = getAuth(app);
     const COSTUMES_PATH = ['artifacts', 'waze-costumes-default', 'public', 'data', 'contest_entries'];
+    const FIRESTORE_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
+    const COLLECTION_URL = `${FIRESTORE_BASE}/${COSTUMES_PATH.join('/')}`;
     const ADMIN_LIST = ['shirelk', 'frim', 'szilka', 'ronp'];
 
     let costumes = [], votingOpen = false, activeCategory = 'single', userLdap = null, activeStageSlide = 'single-frontrunners';
-    let isLoadingCostumes = true, authPromise = null;
+    let isLoadingCostumes = true, loadErrorMsg = null, isPresentationMode = false;
+    const STAGE_SLIDE_ORDER = ['single-frontrunners', 'single-winners', 'group-frontrunners', 'group-winners'];
+
+    function logLocalDiag(step) {
+      if (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '[::1]') {
+        fetch(`/__diag_${step}`, { method: 'GET', cache: 'no-store' }).catch(() => {});
+      }
+    }
 
     function saveCostumesCache() {
       try {
@@ -480,29 +484,71 @@
       } catch (e) { /* ignore */ }
     }
 
-    async function getFastRestToken() {
-      const cached = sessionStorage.getItem('wazeFastToken');
-      const exp = Number(sessionStorage.getItem('wazeFastTokenExp') || 0);
-      if (cached && Date.now() < exp) return cached;
+    function clearFastRestToken() {
+      try {
+        localStorage.removeItem('wazeFastToken');
+        localStorage.removeItem('wazeFastTokenExp');
+        sessionStorage.removeItem('wazeFastToken');
+        sessionStorage.removeItem('wazeFastTokenExp');
+      } catch (e) {}
+    }
+
+    async function getFastRestToken(forceRefresh = false) {
+      if (!forceRefresh) {
+        const cached = localStorage.getItem('wazeFastToken') || sessionStorage.getItem('wazeFastToken');
+        const exp = Number(localStorage.getItem('wazeFastTokenExp') || sessionStorage.getItem('wazeFastTokenExp') || 0);
+        if (cached && Date.now() < exp) return cached;
+      }
       const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`, {
         method: 'POST',
+        referrerPolicy: 'no-referrer',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ returnSecureToken: true })
       });
       const data = await res.json();
       if (data.idToken) {
-        sessionStorage.setItem('wazeFastToken', data.idToken);
-        sessionStorage.setItem('wazeFastTokenExp', String(Date.now() + 50 * 60 * 1000));
+        const expStr = String(Date.now() + 50 * 60 * 1000);
+        try {
+          localStorage.setItem('wazeFastToken', data.idToken);
+          localStorage.setItem('wazeFastTokenExp', expStr);
+        } catch (e) {}
+        try {
+          sessionStorage.setItem('wazeFastToken', data.idToken);
+          sessionStorage.setItem('wazeFastTokenExp', expStr);
+        } catch (e) {}
         return data.idToken;
       }
-      throw new Error('Auth token error');
+      throw new Error(data.error?.message || 'Auth token error');
     }
 
-    async function fetchCostumesFast() {
+    async function firestoreRestFetch(url, options = {}) {
+      let token = await getFastRestToken(false);
+      let res = await fetch(url, {
+        ...options,
+        referrerPolicy: 'no-referrer',
+        headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` }
+      });
+      if (res.status === 401 || res.status === 403) {
+        clearFastRestToken();
+        token = await getFastRestToken(true);
+        res = await fetch(url, {
+          ...options,
+          referrerPolicy: 'no-referrer',
+          headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` }
+        });
+      }
+      return res;
+    }
+
+    window.fetchCostumesFast = async function fetchCostumesFast(isBackgroundPoll = false) {
+      if (!isBackgroundPoll && costumes.length === 0) {
+        isLoadingCostumes = true;
+        loadErrorMsg = null;
+        renderGrid();
+      }
       try {
-        const token = await getFastRestToken();
-        const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/${COSTUMES_PATH.join('/')}?pageSize=100`;
-        const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+        if (!isBackgroundPoll) logLocalDiag('fetch_start');
+        const res = await firestoreRestFetch(`${COLLECTION_URL}?pageSize=100`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const docs = data.documents || [];
@@ -526,22 +572,23 @@
         });
         costumes = loaded;
         isLoadingCostumes = false;
+        loadErrorMsg = null;
         saveCostumesCache();
         renderGrid(); updateUI(); renderRankings();
+        if (!isBackgroundPoll) logLocalDiag(`fetch_ok_${loaded.length}`);
       } catch (err) {
-        console.warn("Fast REST fetch warning:", err);
+        console.error("Firestore REST fetch error:", err);
+        isLoadingCostumes = false;
+        if (costumes.length === 0) {
+          loadErrorMsg = err?.message || 'Failed to connect to Firebase';
+        }
+        renderGrid();
+        if (!isBackgroundPoll) logLocalDiag(`fetch_err_${encodeURIComponent(err?.message || 'unknown')}`);
       }
-    }
-
-    function ensureAuth() {
-      if (auth.currentUser) return Promise.resolve(auth.currentUser);
-      if (!authPromise) {
-        authPromise = signInAnonymously(auth).finally(() => { authPromise = null; });
-      }
-      return authPromise;
-    }
+    };
 
     async function init() {
+      logLocalDiag('init_start');
       const savedLdap = localStorage.getItem('voterLdap');
       userLdap = savedLdap ? savedLdap.trim().toLowerCase() : null;
       if (!userLdap) document.getElementById('disclosure-modal').classList.remove('hidden');
@@ -557,41 +604,13 @@
         if (window.location.hash === '#winners') window.openStagePresentation();
       });
 
-      // Safety fallback: never stay stuck on loading state
-      setTimeout(() => {
-        if (isLoadingCostumes) {
-          isLoadingCostumes = false;
-          renderGrid();
-        }
-      }, 6000);
+      await window.fetchCostumesFast(false);
 
-      // 1. Trigger direct HTTPS REST fetch immediately in parallel
-      fetchCostumesFast();
-
-      // 2. Connect real-time listener in parallel
-      ensureAuth()
-        .catch(err => console.warn("Anonymous auth warning:", err))
-        .finally(() => {
-          onSnapshot(collection(db, ...COSTUMES_PATH), (snap) => {
-            costumes = [];
-            snap.forEach(d => {
-              if (d.id === '_config_') votingOpen = Boolean(d.data().isOpen);
-              else costumes.push({ id: d.id, ...d.data() });
-            });
-            isLoadingCostumes = false;
-            saveCostumesCache();
-            renderGrid(); updateUI(); renderRankings();
-          }, (err) => {
-            console.error("Firestore snapshot error:", err);
-            isLoadingCostumes = false;
-            renderGrid();
-            if (err?.code === 'permission-denied' && ADMIN_LIST.includes(userLdap)) {
-              showToast("Firestore rules expired! Update Firebase Console Rules.", "⚠️");
-            }
-          });
-        });
+      // Keep costumes & votes synced in real time without WebChannel hangs
+      setInterval(() => {
+        if (!document.hidden) window.fetchCostumesFast(true);
+      }, 8000);
     }
-    init();
 
     window.saveInitialLdap = () => {
       const input = document.getElementById('initial-ldap').value.trim().toLowerCase();
@@ -620,12 +639,17 @@
       updateUI();
       renderGrid();
       try {
-        await ensureAuth();
-        await setDoc(doc(db, ...COSTUMES_PATH, '_config_'), { isOpen: nextState }, { merge: true });
+        const res = await firestoreRestFetch(`${COLLECTION_URL}/_config_?updateMask.fieldPaths=isOpen`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fields: { isOpen: { booleanValue: nextState } } })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        saveCostumesCache();
         showToast(nextState ? "Voting is now OPEN!" : "Voting is now CLOSED.", nextState ? "🟢" : "🔒");
       } catch (err) {
         console.error("Failed to update voting status:", err);
-        showToast(err?.code === 'permission-denied' ? "Firestore permission denied (check Firebase Rules)" : "Updated locally (Firestore sync error)", "⚠️");
+        showToast("Updated locally (Firestore sync error)", "⚠️");
       }
     };
 
@@ -687,7 +711,9 @@
                     </div>
                 </div>`}).join('') : (isLoadingCostumes
           ? '<div class="col-span-full text-center py-20 text-gray-500 font-black uppercase tracking-widest text-sm animate-pulse">⏳ Loading costumes...</div>'
-          : '<div class="col-span-full text-center py-20 text-gray-400 font-bold uppercase tracking-widest text-xs">No costumes uploaded in this category yet...</div>');
+          : (loadErrorMsg
+            ? `<div class="col-span-full text-center py-16 space-y-3"><div class="text-red-500 font-black uppercase tracking-widest text-xs">⚠️ Could not load costumes (${escapeHtml(loadErrorMsg)})</div><button onclick="fetchCostumesFast(false)" class="px-5 py-2 rounded-full bg-[#32C2ED] text-black border-2 border-black font-black text-xs uppercase shadow-sm">Retry</button></div>`
+            : '<div class="col-span-full text-center py-20 text-gray-400 font-bold uppercase tracking-widest text-xs">No costumes uploaded in this category yet...</div>'));
     }
 
     window.openVoteModal = (id) => {
@@ -738,21 +764,60 @@
         return showToast("Limit reached!", "🚫");
       }
       try {
-        await ensureAuth();
-        await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayUnion(userLdap) });
+        const docPath = `projects/${firebaseConfig.projectId}/databases/(default)/documents/${COSTUMES_PATH.join('/')}/${id}`;
+        const res = await firestoreRestFetch(`${FIRESTORE_BASE}:commit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            writes: [{
+              transform: {
+                document: docPath,
+                fieldTransforms: [{
+                  fieldPath: 'voters',
+                  appendMissingElements: { values: [{ stringValue: userLdap }] }
+                }]
+              }
+            }]
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        target.voters = Array.from(new Set([...(target.voters || []), userLdap]));
+        saveCostumesCache();
+        renderGrid(); renderRankings();
         showToast("Success!", "🗳️");
         closeModal('vote-modal');
       } catch (err) {
         console.error("Vote failed:", err);
-        showToast(err?.code === 'permission-denied' ? "Database permission error (check Firebase Rules)" : "Failed to submit vote. Try again.", "🔥");
+        showToast("Failed to submit vote. Try again.", "🔥");
       }
     };
 
     window.handleRemoveVoteSubmit = async () => {
       const id = document.getElementById('remove-costume-id').value;
+      const target = costumes.find(c => c.id === id);
       try {
-        await ensureAuth();
-        await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayRemove(userLdap) });
+        const docPath = `projects/${firebaseConfig.projectId}/databases/(default)/documents/${COSTUMES_PATH.join('/')}/${id}`;
+        const res = await firestoreRestFetch(`${FIRESTORE_BASE}:commit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            writes: [{
+              transform: {
+                document: docPath,
+                fieldTransforms: [{
+                  fieldPath: 'voters',
+                  removeAllFromArray: { values: [{ stringValue: userLdap }] }
+                }]
+              }
+            }]
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (target) {
+          target.voters = (target.voters || []).filter(v => v.toLowerCase() !== userLdap.toLowerCase());
+        }
+        saveCostumesCache();
+        renderGrid(); renderRankings();
         showToast("Vote Removed", "🗑️");
         closeModal('remove-vote-modal');
       } catch (err) {
@@ -764,8 +829,13 @@
     window.handleDeleteEntrySubmit = async () => {
       const id = document.getElementById('delete-entry-id').value;
       try {
-        await ensureAuth();
-        await deleteDoc(doc(db, ...COSTUMES_PATH, id));
+        const res = await firestoreRestFetch(`${COLLECTION_URL}/${encodeURIComponent(id)}`, {
+          method: 'DELETE'
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        costumes = costumes.filter(c => c.id !== id);
+        saveCostumesCache();
+        renderGrid(); renderRankings();
         showToast("Costume Removed", "🚨");
         closeModal('delete-entry-modal');
       } catch (err) {
@@ -773,9 +843,6 @@
         showToast("Failed to delete costume. Try again.", "🔥");
       }
     };
-
-    const STAGE_SLIDE_ORDER = ['single-frontrunners', 'single-winners', 'group-frontrunners', 'group-winners'];
-    let isPresentationMode = false;
 
     window.setStageSlide = (slideId) => {
       activeStageSlide = slideId;
@@ -1179,18 +1246,35 @@
         // and cannot store raw File objects.
         const compressedImage = await compressImage(file);
 
-        await ensureAuth();
+        const nowTs = Date.now();
+        const res = await firestoreRestFetch(COLLECTION_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fields: {
+              ldap: { stringValue: userLdap },
+              costumeName: { stringValue: costumeNameVal },
+              image: { stringValue: compressedImage },
+              category: { stringValue: selectedCat },
+              createdAt: { integerValue: String(nowTs) },
+              voters: { arrayValue: { values: [] } }
+            }
+          })
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const createdDoc = await res.json();
+        const newId = (createdDoc.name || '').split('/').pop() || String(nowTs);
         const newEntry = {
+          id: newId,
           ldap: userLdap,
           costumeName: costumeNameVal,
           image: compressedImage,
           category: selectedCat,
           voters: [],
-          createdAt: Date.now()
+          createdAt: nowTs
         };
-        const docRef = await addDoc(collection(db, ...COSTUMES_PATH), newEntry);
-        if (!costumes.some(c => c.id === docRef.id)) {
-          costumes.push({ id: docRef.id, ...newEntry });
+        if (!costumes.some(c => c.id === newId)) {
+          costumes.push(newEntry);
         }
         saveCostumesCache();
 
@@ -1208,8 +1292,6 @@
         console.error("Upload failed: ", error);
         if (error?.message === 'UNSUPPORTED_IMAGE_FORMAT') {
           showToast("Unsupported image format. Please use JPG or PNG.", "📸");
-        } else if (error?.code === 'permission-denied') {
-          showToast("Firestore permission denied — update Firebase Console Rules!", "🔒");
         } else {
           showToast("Upload failed. Please try again.", "🔥");
         }
@@ -1225,6 +1307,8 @@
     }
 
     window.onclick = (e) => { if (e.target.id && e.target.id.endsWith('modal') && e.target.id !== 'disclosure-modal') e.target.classList.add('hidden'); };
+
+    init();
   </script>
 </body>
 
