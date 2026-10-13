@@ -117,15 +117,15 @@
       <div class="w-full aspect-[1030/649] overflow-hidden border-b-[4px] border-white relative">
         <img src="screens/middle%20banner.svg" alt="Join the Contest!" class="w-full h-auto block">
       </div>
-      <!-- Bottom text portion matching Voting App@8x.png with updated 8:30 PM - 8:45 PM schedule -->
+      <!-- Bottom text portion matching Voting App@8x.png with updated 8:10 PM registration & 8:15 PM - 8:45 PM voting schedule -->
       <div class="px-5 py-7 sm:px-8 sm:py-8 md:px-10 md:py-10 text-center text-black">
         <h3 class="text-xl sm:text-2xl md:text-3xl font-extrabold leading-tight mb-3 md:mb-4">
           Take a photo at the photo wall<br>and upload it here!
         </h3>
         <p class="text-sm sm:text-base md:text-lg font-medium leading-relaxed max-w-lg mx-auto">
-          You may submit your photo until <span class="font-bold">8:30 PM</span>.<br>
-          Voting will run from <span class="font-bold">8:30 PM to 8:45 PM</span>.<br>
-          Starting at 8:30 PM, you can cast three votes<br class="hidden sm:inline">
+          You may submit your photo until <span class="font-bold">8:10 PM</span>.<br>
+          Voting will run from <span class="font-bold">8:15 PM to 8:45 PM</span>.<br>
+          Starting at 8:15 PM, you can cast three votes<br class="hidden sm:inline">
           for each category (Individual &amp; Group).<br>
           Voting ends at <span class="font-bold">8:45 PM</span>.<br>
           Winners will be announced following<br class="hidden sm:inline">
@@ -1092,7 +1092,7 @@
     function updateUI() {
       document.getElementById('voting-status-msg').innerHTML = votingOpen
         ? `The clash of powers is <span class="text-[#32C2ED] animate-pulse font-black uppercase">Live</span>! Voting closes at 8:45 PM.`
-        : `Battle energy begins accumulating at 8:30 PM (Voting: 8:30 PM – 8:45 PM).`;
+        : `Battle energy begins accumulating at 8:15 PM (Voting: 8:15 PM – 8:45 PM).`;
       const statusTxt = document.getElementById('admin-status-text');
       if (statusTxt) {
         statusTxt.textContent = votingOpen ? '🟢 Open' : '🔴 Closed';
