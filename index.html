@@ -8,7 +8,6 @@
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦸</text></svg>">
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -558,33 +557,39 @@
         if (window.location.hash === '#winners') window.openStagePresentation();
       });
 
-      // 1. Load costumes immediately via direct HTTPS REST (bypasses Firebase SDK IndexedDB & WebChannel delays)
-      await fetchCostumesFast();
-
-      // 2. Connect real-time listener in the background after initial load finishes
-      try {
-        await ensureAuth();
-      } catch (err) {
-        console.warn("Anonymous auth warning:", err);
-      }
-
-      onSnapshot(collection(db, ...COSTUMES_PATH), (snap) => {
-        costumes = [];
-        snap.forEach(d => {
-          if (d.id === '_config_') votingOpen = Boolean(d.data().isOpen);
-          else costumes.push({ id: d.id, ...d.data() });
-        });
-        isLoadingCostumes = false;
-        saveCostumesCache();
-        renderGrid(); updateUI(); renderRankings();
-      }, (err) => {
-        console.error("Firestore snapshot error:", err);
-        isLoadingCostumes = false;
-        renderGrid();
-        if (err?.code === 'permission-denied' && ADMIN_LIST.includes(userLdap)) {
-          showToast("Firestore rules expired! Update Firebase Console Rules.", "⚠️");
+      // Safety fallback: never stay stuck on loading state
+      setTimeout(() => {
+        if (isLoadingCostumes) {
+          isLoadingCostumes = false;
+          renderGrid();
         }
-      });
+      }, 6000);
+
+      // 1. Trigger direct HTTPS REST fetch immediately in parallel
+      fetchCostumesFast();
+
+      // 2. Connect real-time listener in parallel
+      ensureAuth()
+        .catch(err => console.warn("Anonymous auth warning:", err))
+        .finally(() => {
+          onSnapshot(collection(db, ...COSTUMES_PATH), (snap) => {
+            costumes = [];
+            snap.forEach(d => {
+              if (d.id === '_config_') votingOpen = Boolean(d.data().isOpen);
+              else costumes.push({ id: d.id, ...d.data() });
+            });
+            isLoadingCostumes = false;
+            saveCostumesCache();
+            renderGrid(); updateUI(); renderRankings();
+          }, (err) => {
+            console.error("Firestore snapshot error:", err);
+            isLoadingCostumes = false;
+            renderGrid();
+            if (err?.code === 'permission-denied' && ADMIN_LIST.includes(userLdap)) {
+              showToast("Firestore rules expired! Update Firebase Console Rules.", "⚠️");
+            }
+          });
+        });
     }
     init();
 
@@ -1059,9 +1064,20 @@
       const name = (file.name || '').toLowerCase();
       const type = (file.type || '').toLowerCase();
       const isHeic = type.includes('heic') || type.includes('heif') || name.endsWith('.heic') || name.endsWith('.heif');
-      if (isHeic && typeof window.heic2any === 'function') {
-        const converted = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
-        return Array.isArray(converted) ? converted[0] : converted;
+      if (isHeic) {
+        if (typeof window.heic2any !== 'function') {
+          await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js';
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+          }).catch(() => {});
+        }
+        if (typeof window.heic2any === 'function') {
+          const converted = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+          return Array.isArray(converted) ? converted[0] : converted;
+        }
       }
       return file;
     }
