@@ -8,6 +8,7 @@
   <link rel="icon"
     href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦸</text></svg>">
   <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -459,6 +460,12 @@
 
     let costumes = [], votingOpen = false, activeCategory = 'single', userLdap = null, activeStageSlide = 'single-frontrunners';
 
+    async function ensureAuth() {
+      if (!auth.currentUser) {
+        await signInAnonymously(auth);
+      }
+    }
+
     async function init() {
       const savedLdap = localStorage.getItem('voterLdap');
       userLdap = savedLdap ? savedLdap.trim().toLowerCase() : null;
@@ -475,7 +482,7 @@
       });
 
       try {
-        await signInAnonymously(auth);
+        await ensureAuth();
       } catch (err) {
         console.warn("Anonymous auth warning:", err);
       }
@@ -489,6 +496,9 @@
         renderGrid(); updateUI(); renderRankings();
       }, (err) => {
         console.error("Firestore snapshot error:", err);
+        if (err?.code === 'permission-denied' && ADMIN_LIST.includes(userLdap)) {
+          showToast("Firestore rules expired! Update Firebase Console Rules.", "⚠️");
+        }
       });
     }
     init();
@@ -520,11 +530,12 @@
       updateUI();
       renderGrid();
       try {
+        await ensureAuth();
         await setDoc(doc(db, ...COSTUMES_PATH, '_config_'), { isOpen: nextState }, { merge: true });
         showToast(nextState ? "Voting is now OPEN!" : "Voting is now CLOSED.", nextState ? "🟢" : "🔒");
       } catch (err) {
         console.error("Failed to update voting status:", err);
-        showToast("Updated locally (Firestore sync error)", "⚠️");
+        showToast(err?.code === 'permission-denied' ? "Firestore permission denied (check Firebase Rules)" : "Updated locally (Firestore sync error)", "⚠️");
       }
     };
 
@@ -634,22 +645,41 @@
         closeModal('vote-modal');
         return showToast("Limit reached!", "🚫");
       }
-      await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayUnion(userLdap) });
-      showToast("Success!", "🗳️"); closeModal('vote-modal');
+      try {
+        await ensureAuth();
+        await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayUnion(userLdap) });
+        showToast("Success!", "🗳️");
+        closeModal('vote-modal');
+      } catch (err) {
+        console.error("Vote failed:", err);
+        showToast(err?.code === 'permission-denied' ? "Database permission error (check Firebase Rules)" : "Failed to submit vote. Try again.", "🔥");
+      }
     };
 
     window.handleRemoveVoteSubmit = async () => {
       const id = document.getElementById('remove-costume-id').value;
-      await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayRemove(userLdap) });
-      showToast("Vote Removed", "🗑️");
-      closeModal('remove-vote-modal');
+      try {
+        await ensureAuth();
+        await updateDoc(doc(db, ...COSTUMES_PATH, id), { voters: arrayRemove(userLdap) });
+        showToast("Vote Removed", "🗑️");
+        closeModal('remove-vote-modal');
+      } catch (err) {
+        console.error("Remove vote failed:", err);
+        showToast("Failed to remove vote. Try again.", "🔥");
+      }
     };
 
     window.handleDeleteEntrySubmit = async () => {
       const id = document.getElementById('delete-entry-id').value;
-      await deleteDoc(doc(db, ...COSTUMES_PATH, id));
-      showToast("Costume Removed", "🚨");
-      closeModal('delete-entry-modal');
+      try {
+        await ensureAuth();
+        await deleteDoc(doc(db, ...COSTUMES_PATH, id));
+        showToast("Costume Removed", "🚨");
+        closeModal('delete-entry-modal');
+      } catch (err) {
+        console.error("Delete costume failed:", err);
+        showToast("Failed to delete costume. Try again.", "🔥");
+      }
     };
 
     const STAGE_SLIDE_ORDER = ['single-frontrunners', 'single-winners', 'group-frontrunners', 'group-winners'];
@@ -938,22 +968,41 @@
     };
     window.closeModal = (id) => document.getElementById(id).classList.add('hidden');
 
-    window.previewImage = (input) => {
+    async function normalizeImageBlob(file) {
+      const name = (file.name || '').toLowerCase();
+      const type = (file.type || '').toLowerCase();
+      const isHeic = type.includes('heic') || type.includes('heif') || name.endsWith('.heic') || name.endsWith('.heif');
+      if (isHeic && typeof window.heic2any === 'function') {
+        const converted = await window.heic2any({ blob: file, toType: 'image/jpeg', quality: 0.85 });
+        return Array.isArray(converted) ? converted[0] : converted;
+      }
+      return file;
+    }
+
+    window.previewImage = async (input) => {
       if (input.files?.[0]) {
-        const reader = new FileReader();
-        reader.onload = e => {
-          document.getElementById('upload-placeholder').style.display = 'none';
-          const img = document.getElementById('preview-img');
-          img.src = e.target.result; img.classList.remove('hidden');
-        };
-        reader.readAsDataURL(input.files[0]);
+        try {
+          const blob = await normalizeImageBlob(input.files[0]);
+          const reader = new FileReader();
+          reader.onload = e => {
+            document.getElementById('upload-placeholder').style.display = 'none';
+            const img = document.getElementById('preview-img');
+            img.src = e.target.result;
+            img.classList.remove('hidden');
+          };
+          reader.readAsDataURL(blob);
+        } catch (err) {
+          console.error("Preview error:", err);
+          showToast("Could not preview image. Please use JPG or PNG.", "⚠️");
+        }
       }
     };
 
-    const compressImage = (file) => {
+    const compressImage = async (file) => {
+      const blob = await normalizeImageBlob(file);
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
-        reader.readAsDataURL(file);
+        reader.readAsDataURL(blob);
         reader.onload = (event) => {
           const img = new Image();
           img.src = event.target.result;
@@ -981,7 +1030,7 @@
             ctx.drawImage(img, 0, 0, width, height);
             resolve(canvas.toDataURL('image/jpeg', CONST_SCALE));
           };
-          img.onerror = (error) => reject(error);
+          img.onerror = () => reject(new Error('UNSUPPORTED_IMAGE_FORMAT'));
         };
         reader.onerror = (error) => reject(error);
       });
@@ -996,9 +1045,14 @@
       }
       const btn = document.getElementById('submit-btn');
       try {
-        const existingCostume = costumes.find(c => c.ldap && c.ldap.toLowerCase() === userLdap.toLowerCase());
+        const selectedCat = document.querySelector('input[name="contestType"]:checked').value;
+        const existingCostume = costumes.find(c =>
+          c.ldap &&
+          c.ldap.toLowerCase() === userLdap.toLowerCase() &&
+          (c.category || 'single') === selectedCat
+        );
         if (existingCostume) {
-          showToast("Only one costume per LDAP is allowed.", "🚫");
+          showToast(`Only one ${selectedCat === 'single' ? 'Individual' : 'Group'} costume per LDAP is allowed.`, "🚫");
           return;
         }
 
@@ -1022,7 +1076,7 @@
         // and cannot store raw File objects.
         const compressedImage = await compressImage(file);
 
-        const selectedCat = document.querySelector('input[name="contestType"]:checked').value;
+        await ensureAuth();
         await addDoc(collection(db, ...COSTUMES_PATH), {
           ldap: userLdap,
           costumeName: costumeNameVal,
@@ -1044,7 +1098,13 @@
         window.switchCategory(selectedCat);
       } catch (error) {
         console.error("Upload failed: ", error);
-        showToast("Upload failed. Please try again.", "🔥");
+        if (error?.message === 'UNSUPPORTED_IMAGE_FORMAT') {
+          showToast("Unsupported image format. Please use JPG or PNG.", "📸");
+        } else if (error?.code === 'permission-denied') {
+          showToast("Firestore permission denied — update Firebase Console Rules!", "🔒");
+        } else {
+          showToast("Upload failed. Please try again.", "🔥");
+        }
       } finally {
         btn.disabled = false;
         btn.innerHTML = "Join the Battle 💥";
