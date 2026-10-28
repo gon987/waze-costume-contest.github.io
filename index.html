@@ -147,6 +147,12 @@
           points="799.31 81.82 768.46 50.98 768.46 66.03 727.18 66.03 727.18 97.61 768.46 97.61 768.46 112.67 799.31 81.82" />
       </svg>
     </button>
+      <!-- 4. View All Contestants Button -->
+    <button onclick="openGalleryModal()"
+      class="w-full bg-white hover:bg-gray-50 active:scale-[0.99] transition-all text-black font-black text-base md:text-xl uppercase tracking-wide py-3.5 md:py-4 px-6 rounded-full border-[3px] border-black shadow-[0_4px_0_#000000] flex items-center justify-center gap-3">
+      <span>🖼️</span>
+      <span>VIEW ALL CONTESTANTS</span>
+    </button>
   </section>
 
   <main class="container mx-auto max-w-5xl p-4 flex-grow relative">
@@ -440,7 +446,21 @@
       </form>
     </div>
   </div>
-
+  <div id="gallery-modal"
+    class="fixed inset-0 bg-[#4A435C]/70 backdrop-blur-sm hidden flex items-center justify-center z-[125] p-3 md:p-6">
+    <div class="bg-white rounded-[2rem] w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl border-4 border-white overflow-hidden">
+      <!-- Header (close button on top-left) -->
+      <div class="relative flex-shrink-0 bg-[#FBE352] border-b-[3px] border-black px-16 py-4 text-center">
+        <button onclick="closeGalleryModal()" aria-label="Close"
+          class="absolute top-3 left-3 md:left-4 w-10 h-10 rounded-full bg-white border-2 border-black shadow-[0_3px_0_#000000] font-black text-lg flex items-center justify-center hover:bg-gray-100 active:shadow-none active:translate-y-[3px] transition">✖</button>
+        <h3 class="text-xl md:text-3xl font-black text-black uppercase tracking-tight leading-tight">All Contestants</h3>
+        <p id="gallery-count" class="text-[10px] md:text-xs font-black uppercase tracking-widest text-black/60"></p>
+      </div>
+      <!-- Scrollable content -->
+      <div id="gallery-content" class="overflow-y-auto p-4 md:p-6 space-y-8"></div>
+    </div>
+  </div>
+  
   <div id="toast"
     class="fixed top-6 left-1/2 transform -translate-x-1/2 -translate-y-40 transition-all duration-500 z-[200] w-[90%] md:w-auto max-w-sm bg-[#4A435C]/95 backdrop-blur-md text-white px-6 py-4 rounded-2xl shadow-2xl border border-white/10 font-semibold text-sm md:text-base flex items-center justify-center gap-3 text-center">
     <span id="toast-icon" class="text-lg"></span> <span id="toast-msg"></span>
@@ -1463,13 +1483,84 @@
         btn.innerHTML = "Join the Battle 💥";
       }
     };
+    // ===== All Contestants Gallery =====
+    function isGalleryOpen() {
+      const m = document.getElementById('gallery-modal');
+      return m && !m.classList.contains('hidden');
+    }
 
+    function renderGalleryCell(c) {
+      const safeName = escapeHtml(c.costumeName);
+      const safeLdap = escapeHtml(c.ldap);
+      return `
+        <div class="flex flex-col items-center text-center min-w-0">
+          <div class="w-full aspect-square rounded-xl md:rounded-2xl overflow-hidden border-2 border-black bg-gray-100 flex items-center justify-center shadow-[0_3px_0_#000000]"
+               data-costume-img-slot="${c.id}">
+            ${c.image
+              ? `<img src="${c.image}" alt="${safeName}" class="w-full h-full object-cover" loading="lazy">`
+              : `<span class="text-xl md:text-3xl text-gray-400 animate-pulse">🦸</span>`}
+          </div>
+          <div class="mt-1.5 w-full truncate font-black text-[10px] sm:text-xs md:text-sm text-black leading-tight">${safeName}</div>
+          <div class="w-full truncate font-bold text-[9px] sm:text-[10px] md:text-xs text-gray-500 uppercase">@${safeLdap}</div>
+        </div>`;
+    }
+
+    function renderGallerySection(title, emoji, list) {
+      return `
+        <section>
+          <div class="flex items-center gap-2 mb-3 md:mb-4">
+            <span class="bg-[#32C2ED] border-2 border-black rounded-full px-3 py-1 text-xs md:text-sm font-black text-black uppercase shadow-sm">${emoji} ${title}</span>
+            <span class="text-[10px] md:text-xs font-black text-gray-400 uppercase tracking-widest">${list.length} ${list.length === 1 ? 'entry' : 'entries'}</span>
+          </div>
+          ${list.length
+            ? `<div class="grid grid-cols-4 gap-2.5 sm:gap-4 md:gap-5">${list.map(renderGalleryCell).join('')}</div>`
+            : `<div class="text-center py-8 text-gray-400 font-bold uppercase tracking-widest text-xs">No ${title.toLowerCase()} yet...</div>`}
+        </section>`;
+    }
+
+    function renderGallery() {
+      const content = document.getElementById('gallery-content');
+      if (!content) return;
+      const byNewest = (a, b) => (b.createdAt || 0) - (a.createdAt || 0);
+      const singles = costumes.filter(c => (c.category || 'single') === 'single').sort(byNewest);
+      const groups = costumes.filter(c => c.category === 'group').sort(byNewest);
+
+      document.getElementById('gallery-count').textContent =
+        `${singles.length + groups.length} contestants`;
+
+      content.innerHTML = (isLoadingCostumes && costumes.length === 0)
+        ? '<div class="text-center py-16 text-gray-500 font-black uppercase tracking-widest text-sm animate-pulse">⏳ Loading contestants...</div>'
+        : renderGallerySection('Individuals', '👤', singles) +
+          `<div class="border-t-4 border-dashed border-gray-200"></div>` +
+          renderGallerySection('Groups', '👨👩👧👦', groups);
+    }
+
+    window.openGalleryModal = () => {
+      renderGallery();
+      document.getElementById('gallery-modal').classList.remove('hidden');
+      document.body.classList.add('overflow-hidden'); // lock background scroll
+      fetchMissingImages(); // make sure every photo gets loaded
+    };
+
+    window.closeGalleryModal = () => {
+      document.getElementById('gallery-modal').classList.add('hidden');
+      document.body.classList.remove('overflow-hidden');
+    };
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && isGalleryOpen()) window.closeGalleryModal();
+    });
+    
     function showToast(m, i) {
       const t = document.getElementById('toast'); document.getElementById('toast-msg').textContent = m; document.getElementById('toast-icon').textContent = i;
       t.classList.remove('-translate-y-40'); setTimeout(() => t.classList.add('-translate-y-40'), 3000);
     }
 
-    window.onclick = (e) => { if (e.target.id && e.target.id.endsWith('modal') && e.target.id !== 'disclosure-modal') e.target.classList.add('hidden'); };
+    window.onclick = (e) => { if (e.target.id && e.target.id.endsWith('modal') && e.target.id !== 'disclosure-modal') {
+      if (e.target.id === 'gallery-modal') return window.closeGalleryModal();
+      e.target.classList.add('hidden'); 
+    }
+     };
 
     init();
   </script>
